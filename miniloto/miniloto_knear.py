@@ -1,13 +1,9 @@
-import csv
-import codecs
+import pandas as pd
 import numpy as np
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.preprocessing import StandardScaler
 
-# ============================================================
-# 設定
-# ============================================================
 CSV_FILE = "miniloto.csv"
 NUM_COLS = ["第1数字", "第2数字", "第3数字", "第4数字", "第5数字"]
 BONUS_COL = "BONUS数字"
@@ -15,38 +11,35 @@ WINDOW = 5
 LOTO_MIN = 1
 LOTO_MAX = 31
 
-# ============================================================
-# データ読み込み
-# ============================================================
-with codecs.open(CSV_FILE, "r", encoding="shift_jis") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
+df = pd.read_csv(CSV_FILE, encoding="shift_jis")
+all_numbers = df[NUM_COLS].values
+bonus_numbers = df[BONUS_COL].values
 
-all_numbers = np.array([[int(row[c]) for c in NUM_COLS] for row in rows])
-bonus_numbers = np.array([int(row[BONUS_COL]) for row in rows])
+print(f"読み込み完了: {len(df)} 回分のデータ")
 
-print(f"読み込み完了: {len(all_numbers)} 回分のデータ")
-
-# ============================================================
-# 特徴量生成
-# ============================================================
 def make_features(all_numbers, bonus_numbers, window=WINDOW):
-    X, y = [], []
     n = len(all_numbers)
-    for i in range(window, n - 1):
-        past = all_numbers[i - window:i]
-        past_bonus = bonus_numbers[i - window:i]
-        flat = past.flatten()
-        feat = [
-            np.mean(flat), np.std(flat), np.max(flat), np.min(flat), np.median(flat),
-            np.mean(np.diff(past, axis=0)),
-            np.mean(past_bonus), np.std(past_bonus), np.max(past_bonus), np.min(past_bonus),
-        ]
-        feat += list(np.mean(past, axis=0))
-        feat += list(np.std(past, axis=0))
-        X.append(feat)
-        y.append(all_numbers[i])
-    return np.array(X), np.array(y)
+    rows = n - window - 1
+    idx = np.arange(rows)[:, None] + np.arange(window)[None, :]
+    past = all_numbers[idx]           # (rows, window, 5)
+    past_bonus = bonus_numbers[idx]   # (rows, window)
+    flat = past.reshape(rows, -1)
+    X = np.concatenate([
+        flat.mean(axis=1).reshape(-1, 1),
+        flat.std(axis=1).reshape(-1, 1),
+        flat.max(axis=1).reshape(-1, 1),
+        flat.min(axis=1).reshape(-1, 1),
+        np.median(flat, axis=1).reshape(-1, 1),
+        np.diff(past, axis=1).mean(axis=(1, 2)).reshape(-1, 1),
+        past_bonus.mean(axis=1).reshape(-1, 1),
+        past_bonus.std(axis=1).reshape(-1, 1),
+        past_bonus.max(axis=1).reshape(-1, 1),
+        past_bonus.min(axis=1).reshape(-1, 1),
+        past.mean(axis=1),   # (rows, 5)
+        past.std(axis=1),    # (rows, 5)
+    ], axis=1)
+    y = all_numbers[window:n - 1]
+    return X, y
 
 X, y = make_features(all_numbers, bonus_numbers)
 print(f"特徴量形状: X={X.shape}, y={y.shape}")
@@ -54,12 +47,9 @@ print(f"特徴量形状: X={X.shape}, y={y.shape}")
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-# ============================================================
-# K近傍回帰で学習・予測
-# ============================================================
-tscv = TimeSeriesSplit(n_splits=5)
+tscv = TimeSeriesSplit(n_splits=3)
 param_grid = {
-    "n_neighbors": list(range(2, 20)),
+    "n_neighbors": [3, 5, 7, 10, 15],
     "weights": ["uniform", "distance"],
 }
 
@@ -67,34 +57,33 @@ raw_predictions = []
 
 print("\n--- 各数字列の学習 ---")
 for col_idx in range(5):
-    col_labels = y[:, col_idx]
     grid = GridSearchCV(
         KNeighborsRegressor(),
-        param_grid, cv=tscv, scoring="neg_mean_squared_error", n_jobs=-1,
+        param_grid,
+        cv=tscv,
+        scoring="neg_mean_squared_error",
+        n_jobs=-1,
     )
-    grid.fit(X_scaled, col_labels)
-    best_model = grid.best_estimator_
+    grid.fit(X_scaled, y[:, col_idx])
+    best = grid.best_estimator_
 
-    past = all_numbers[-WINDOW:]
-    past_bonus = bonus_numbers[-WINDOW:]
-    flat = past.flatten()
-    next_feat = [
-        np.mean(flat), np.std(flat), np.max(flat), np.min(flat), np.median(flat),
-        np.mean(np.diff(past, axis=0)),
-        np.mean(past_bonus), np.std(past_bonus), np.max(past_bonus), np.min(past_bonus),
-    ]
-    next_feat += list(np.mean(past, axis=0))
-    next_feat += list(np.std(past, axis=0))
+    past_w = all_numbers[-WINDOW:]
+    past_bonus_w = bonus_numbers[-WINDOW:]
+    flat_w = past_w.flatten()
+    next_feat = np.concatenate([
+        [flat_w.mean(), flat_w.std(), flat_w.max(), flat_w.min(), np.median(flat_w)],
+        [np.diff(past_w, axis=0).mean()],
+        [past_bonus_w.mean(), past_bonus_w.std(), past_bonus_w.max(), past_bonus_w.min()],
+        past_w.mean(axis=0),
+        past_w.std(axis=0),
+    ]).reshape(1, -1)
+    next_feat_scaled = scaler.transform(next_feat)
 
-    next_feat_scaled = scaler.transform(np.array(next_feat).reshape(1, -1))
-    pred = int(round(best_model.predict(next_feat_scaled)[0]))
+    pred = int(round(best.predict(next_feat_scaled)[0]))
     pred = max(LOTO_MIN, min(pred, LOTO_MAX))
     raw_predictions.append(pred)
-    print(f"  第{col_idx+1}数字: 予測={pred:2d}  (n_neighbors={best_model.n_neighbors}, weights={best_model.weights})")
+    print(f"  第{col_idx+1}数字: 予測={pred:2d}  (n_neighbors={best.n_neighbors}, weights={best.weights})")
 
-# ============================================================
-# 重複排除
-# ============================================================
 def remove_duplicates(predictions, all_numbers, loto_min=LOTO_MIN, loto_max=LOTO_MAX):
     flat_all = all_numbers.flatten()
     freq = {n: 0 for n in range(loto_min, loto_max + 1)}

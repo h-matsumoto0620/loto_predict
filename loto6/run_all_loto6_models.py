@@ -1,6 +1,7 @@
 import subprocess
-import re
 import sys
+import re
+import unicodedata
 
 # ============================================================
 # STEP0: CSV更新（update_loto6_csv.py を実行）
@@ -33,13 +34,12 @@ scripts = [
     ("RBF SVR",                  "loto6_support_improved.py"),
     ("線形 SVR",                 "loto6_svr_improved.py"),
     ("決定木回帰",               "loto6_tree_improved.py"),
-    ("アンサンブル Top5",        "loto6_ensemble_top5.py"),
 ]
 
 # ============================================================
 # 各スクリプトを順に実行し、予測番号を収集
 # ============================================================
-model_predictions: dict[str, list[int]] = {}
+model_predictions: dict[str, tuple[int, ...]] = {}
 
 for model_name, script in scripts:
     print(f"\n{'='*55}")
@@ -51,96 +51,47 @@ for model_name, script in scripts:
             capture_output=True, text=True, check=True
         )
         print(result.stdout)
-
         match = re.search(r"最終予測番号（6つ）:\s*(\[[\d,\s]+\])", result.stdout)
         if match:
-            numbers = list(map(int, re.findall(r"\d+", match.group(1))))
+            numbers = tuple(sorted(map(int, re.findall(r"\d+", match.group(1)))))
             model_predictions[model_name] = numbers
-        else:
-            print(f"  ※ 予測番号を取得できませんでした（出力フォーマット不一致）")
-
     except subprocess.CalledProcessError as e:
         print(f"  エラー: 実行中に問題が発生しました。\n{e.stderr}")
     except FileNotFoundError:
         print(f"  スキップ: {script} が見つかりません。")
 
 # ============================================================
-# 全モデルの予測番号をまとめて表示
+# 組み合わせ重複チェック（一覧表示前に集計）
+# ============================================================
+combo_to_models: dict[tuple[int, ...], list[str]] = {}
+for model_name, numbers in model_predictions.items():
+    combo_to_models.setdefault(numbers, []).append(model_name)
+
+# ============================================================
+# 予測番号一覧（重複モデルは1行にまとめる）
 # ============================================================
 print(f"\n{'='*55}")
-print("  【全モデルの予測番号一覧】")
+print("  【各モデルの予測番号一覧】")
 print(f"{'='*55}")
 
-if not model_predictions:
-    print("  実行できたモデルがありません。")
-    sys.exit(1)
-
+# 表示行を先に組み立てる
+rows: list[tuple[str, tuple[int, ...]]] = []
+printed_models: set[str] = set()
 for model_name, numbers in model_predictions.items():
-    nums_str = "  ".join(f"{n:2d}" for n in sorted(numbers))
-    print(f"  {model_name:<25}: {nums_str}")
+    if model_name in printed_models:
+        continue
+    group_models = combo_to_models[numbers]
+    label = "、".join(group_models)
+    rows.append((label, numbers))
+    printed_models.update(group_models)
 
-# ============================================================
-# 重複チェックと除外表示
-# ============================================================
-print(f"\n{'='*55}")
-print("  【重複チェックと最終集計】")
-print(f"{'='*55}")
+def terminal_width(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
 
-number_to_models: dict[int, list[str]] = {}
-for model_name, numbers in model_predictions.items():
-    for n in numbers:
-        number_to_models.setdefault(n, []).append(model_name)
+def ljust_terminal(s: str, width: int) -> str:
+    return s + " " * max(0, width - terminal_width(s))
 
-duplicates_found = False
-for number, models in sorted(number_to_models.items()):
-    if len(models) > 1:
-        if not duplicates_found:
-            print("\n  ▼ 複数モデルで重複していた番号:")
-            duplicates_found = True
-        models_str = "、".join(models)
-        print(f"    番号 {number:2d}  →  {len(models)}モデルが予測  ({models_str})")
-
-if not duplicates_found:
-    print("\n  重複番号はありませんでした。")
-
-# ============================================================
-# モデルごとの採用 / 除外 内訳
-# ============================================================
-print("\n  ▼ モデルごとの採用 / 除外 内訳:")
-
-adopted: dict[int, str] = {}
-excluded_log: list[tuple[str, int, str]] = []
-
-for model_name, numbers in model_predictions.items():
-    adopted_nums = []
-    excluded_nums = []
-    for n in numbers:
-        if n not in adopted:
-            adopted[n] = model_name
-            adopted_nums.append(n)
-        else:
-            excluded_nums.append(n)
-            excluded_log.append((model_name, n, adopted[n]))
-
-    adopted_str  = "  ".join(f"{n:2d}" for n in sorted(adopted_nums))  or "（なし）"
-    excluded_str = "  ".join(f"{n:2d}" for n in sorted(excluded_nums)) or "（なし）"
-    print(f"\n  {model_name}")
-    print(f"    採用番号 : {adopted_str}")
-    print(f"    除外番号 : {excluded_str}")
-    if excluded_nums:
-        for n in excluded_nums:
-            print(f"      ※ {n:2d} は「{adopted[n]}」がすでに予測済みのため除外")
-
-# ============================================================
-# 最終結果
-# ============================================================
-final_unique = sorted(adopted.keys())
-
-print(f"\n{'='*55}")
-print("  【最終結果：重複除去後の予測番号】")
-print(f"{'='*55}")
-print(f"  予測番号 ({len(final_unique)}個): {final_unique}")
-print()
-for n in final_unique:
-    print(f"    {n:2d}  ←  {adopted[n]}")
-print(f"{'='*55}\n")
+max_label_width = max(terminal_width(label) for label, _ in rows) if rows else 25
+for label, numbers in rows:
+    nums_str = "  ".join(f"{n:2d}" for n in numbers)
+    print(f"  {ljust_terminal(label, max_label_width)} ： {nums_str}")
